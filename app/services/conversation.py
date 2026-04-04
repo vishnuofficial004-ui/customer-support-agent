@@ -1,8 +1,9 @@
 from app.modules.language import process_language_step
 from app.modules.intent import process_intent_step
+from app.modules.recommendation import recommend_product
 from app.utils.helpers import extract_user_message, extract_user_id
 
-# Session store
+# In-memory session store
 sessions = {}
 
 
@@ -31,7 +32,15 @@ async def handle_incoming_message(payload: dict):
         return {"reply": response}
 
     # -----------------------
-    # Step 2: Intent + Budget Detection
+    # Step 2: Intent + Budget + Product Type Detection
     # -----------------------
-    response = await process_intent_step(session, message)
+    # Only process intent if not all captured yet
+    if not (session.get("intent") and session.get("budget") and session.get("product_type")):
+        response = await process_intent_step(session, message)
+        return {"reply": response}
+
+    # -----------------------
+    # Step 3: Product Recommendation
+    # -----------------------
+    response = await recommend_product(session)
     return {"reply": response}
