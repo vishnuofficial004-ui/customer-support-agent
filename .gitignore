@@ -1,32 +1,13 @@
-# Environment and secrets
-.env
-*.env
-
-# Python
 venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-*.py[cod]
-
-# Django
+env/
+ENV/
+.venv/
+.env
+.DS_Store
 *.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-media/
-
-# VS Code
-.vscode/
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/ 
+showroom.db
