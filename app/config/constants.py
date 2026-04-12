@@ -8,10 +8,10 @@ SUPPORTED_LANGUAGES = [
 ]
 
 LANGUAGE_SCRIPT_MAP = {
-    "Tamil": "Tamil script",
-    "Telugu": "Telugu script",
-    "Kannada": "Kannada script",
-    "Malayalam": "Malayalam script",
-    "Hindi": "Devanagari script",
-    "English": "English alphabet"
+    "Tamil": "Tamil",
+    "Telugu": "Telugu",
+    "Kannada": "Kannada",
+    "Malayalam": "Malayalam",
+    "Hindi": "Devanagari",
+    "English": "Latin"
 }

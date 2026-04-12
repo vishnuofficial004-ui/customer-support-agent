@@ -3,7 +3,12 @@ from groq import Groq
 
 
 def get_client():
-    return Groq(api_key=os.getenv("GROQ_API_KEY"))
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY is not set. Make sure app/.env is loaded or the environment variable is configured."
+        )
+    return Groq(api_key=api_key)
 
 
 async def call_groq(prompt: str) -> str:

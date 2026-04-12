@@ -21,7 +21,9 @@ async def recommend_product(session: dict) -> str:
 
     # Filter by budget
     min_budget, max_budget = parse_budget(budget)
-    filtered = [p for p in filtered if min_budget <= p["price"] <= max_budget]
+
+    if min_budget is not None and max_budget is not None:
+        filtered = [p for p in filtered if min_budget <= p["price"] <= max_budget]
 
     # Filter by intent (health preference)
     if intent == "health":
@@ -58,15 +60,23 @@ async def recommend_product(session: dict) -> str:
 
 def parse_budget(budget: str):
     """
-    Convert budget string to min/max integers.
-    Supports formats: '15000-25000' or '20000'
+    Safe parsing of budget string.
     """
-    if "-" in budget:
-        parts = budget.split("-")
-        return int(parts[0]), int(parts[1])
-    else:
+    try:
+        if not budget:
+            return None, None
+
+        budget = budget.strip()
+
+        if "-" in budget:
+            parts = budget.split("-")
+            return int(parts[0]), int(parts[1])
+
         val = int(budget)
-        return val, val + 5000  # give small buffer
+        return val, val + 5000
+
+    except Exception:
+        return None, None
 
 async def translate_text(text: str, language: str) -> str:
     """

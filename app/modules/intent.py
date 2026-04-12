@@ -1,125 +1,206 @@
 from app.integrations.groq_client import call_groq
-from app.config.constants import LANGUAGE_SCRIPT_MAP
-
-INTENT_QUESTIONS = [
-    "Are you looking for a product for health reasons or for lifestyle/home use?",
-    "What budget range are you considering?",
-    "Which product type are you interested in (sofa, bed, mattress, wardrobe, chair)?"
-]
+from app.modules.language import safe_translate
+from app.db.products import get_products_by_type, get_all_product_types
 
 
-async def generate_intent_question(session: dict) -> str:
-    """
-    Decide which question to ask next based on session state.
-    """
-    if not session.get("intent"):
-        return await translate_question(INTENT_QUESTIONS[0], session["preferred_language"])
-    if not session.get("budget"):
-        return await translate_question(INTENT_QUESTIONS[1], session["preferred_language"])
-    if not session.get("product_type"):
-        return await translate_question(INTENT_QUESTIONS[2], session["preferred_language"])
-    
-    # All captured, return confirmation
-    confirmation_text = (
-        f"Got it! You are looking for a {session['product_type']} "
-        f"for {session['intent']} purposes with a budget of {session['budget']}."
-    )
-    return await translate_question(confirmation_text, session["preferred_language"])
+# -----------------------------
+# MAIN FLOW (STATE MACHINE)
+# -----------------------------
+async def process_intent_step(session: dict, message: str):
 
-
-# session keys:
-# intent, intent_confirmed
-# budget, budget_confirmed
-# product_type, product_confirmed
-
-async def process_intent_step(session: dict, message: str) -> str:
     language = session["preferred_language"]
 
-    # ---------------------
-    # Step 1: Intent
-    # ---------------------
+    # -----------------------------
+    # STEP 1: Extract everything ONCE
+    # -----------------------------
+    extracted = await extract_all_entities(message)
+
+    if not (session.get("intent") and session.get("product_type") and session.get("budget")):
+        return await generate_next_question(session, message)
+
+    # -----------------------------
+    # STEP 2: ASK MISSING DATA
+    # -----------------------------
+
+    # INTENT
     if not session.get("intent"):
-        intent = await extract_intent(message)
-        if not intent:
-            return await translate_question(INTENT_QUESTIONS[0], language)
-        session["intent"] = intent
-        # Instead of compliment, always ask next question
-        return await translate_question(INTENT_QUESTIONS[1], language)  # ask budget next
+        options = ["Health", "Lifestyle"]
 
-    # ---------------------
-    # Step 2: Budget
-    # ---------------------
-    if not session.get("budget"):
-        budget = await extract_budget(message)
-        if not budget:
-            return await translate_question(INTENT_QUESTIONS[1], language)
-        session["budget"] = budget
-        return await translate_question(INTENT_QUESTIONS[2], language)  # ask product type
+        translated_options = [
+            await safe_translate(opt, language) for opt in options
+        ]
 
-    # ---------------------
-    # Step 3: Product Type
-    # ---------------------
+        return {
+            "type": "interactive",
+            "message": await safe_translate(
+                "Why are you buying this product?",
+                language
+            ),
+            "options": translated_options
+        }
+
+    # PRODUCT TYPE
     if not session.get("product_type"):
-        product_type = await extract_product_type(message)
-        if not product_type:
-            return await translate_question(INTENT_QUESTIONS[2], language)
-        session["product_type"] = product_type
+        product_types = get_all_product_types()
 
-    # ---------------------
-    # Step 4: Summary confirmation
-    # ---------------------
-    summary = (
-        f"Great! I have noted: Intent: {session['intent']}, "
-        f"Budget: {session['budget']}, "
-        f"Product: {session['product_type']}. Is this correct?"
-    )
-    return await translate_question(summary, language)
+        translated_products = [
+            await safe_translate(p, language) for p in product_types
+        ]
+
+        return {
+            "type": "interactive",
+            "message": await safe_translate(
+                "Which product are you looking for?",
+                language
+            ),
+            "options": translated_products
+        }
+
+    # BUDGET
+    if not session.get("budget"):
+        product_type = session["product_type"]
+
+        products = get_products_by_type(product_type)
+
+        if not products:
+            return {
+                "type": "text",
+                "message": await safe_translate(
+                    "Currently this product is not available. Would you like to explore other options?",
+                    language
+                )
+            }
+
+        prices = sorted(set(
+            p.get("price") for p in products if p.get("price") is not None
+        ))
+
+        if not prices:
+            return {
+                "type": "text",
+                "message": await safe_translate(
+                    "Please tell your budget",
+                    language
+                )
+            }
+
+        price_options = [str(p) for p in prices[:5]]
+
+        return {
+            "type": "interactive",
+            "message": await safe_translate(
+                "Select your budget",
+                language
+            ),
+            "options": price_options
+        }
+
+    # -----------------------------
+    # DONE
+    # -----------------------------
+    return None
+
+
 # -----------------------------
-async def extract_intent(message: str) -> str:
+# SINGLE LLM CALL
+# -----------------------------
+async def extract_all_entities(message: str) -> dict:
+
     prompt = f"""
-You are a showroom AI assistant. Determine the user's intent:
-- 'health' if related to back/joint pain or medical reasons
-- 'lifestyle' if related to home/living preferences
+Extract structured data from user message.
 
-Respond with 'health' or 'lifestyle' only.
-User message: {message}
-"""
-    resp = await call_groq(prompt)
-    return resp.strip().lower() if resp else None
+Return STRICT JSON:
+{{
+  "intent": "...",
+  "product_type": "...",
+  "budget": "..."
+}}
 
-
-async def extract_budget(message: str) -> str:
-    prompt = f"""
-Extract numeric budget range from the message.
-Respond as min-max or single number.
-User message: {message}
-"""
-    resp = await call_groq(prompt)
-    return resp.strip() if resp else None
-
-
-async def extract_product_type(message: str) -> str:
-    prompt = f"""
-Identify product type: sofa, bed, mattress, wardrobe, chair.
-Respond with exact product type only.
-User message: {message}
-"""
-    resp = await call_groq(prompt)
-    return resp.strip().lower() if resp else None
-
-
-async def translate_question(text: str, language: str) -> str:
-    """
-    Translate text to user's preferred language with script enforced.
-    """
-    script = LANGUAGE_SCRIPT_MAP.get(language, language)
-    prompt = f"""
-You are a showroom AI assistant.
 RULES:
-- Respond ONLY in {language} using {script}
-- Keep it short, friendly, and clear
-- Do NOT add extra explanation
-Text: {text}
+- Understand ANY language (English, Tanglish, Hindi, etc.)
+- intent: short label (health, comfort, luxury, etc.) or null
+- product_type: generic category (sofa, bed, mattress, etc.) or null
+- budget: "15000" or "15000-25000" or null
+- If not found → null
+- DO NOT explain
+
+Message:
+{message}
 """
+
     resp = await call_groq(prompt)
-    return resp.strip() if resp else text  # fallback to English if null
+
+    try:
+        import json
+        data = json.loads(resp)
+        return {
+            "intent": data.get("intent"),
+            "product_type": data.get("product_type"),
+            "budget": data.get("budget")
+        }
+    except:
+        return {}
+    
+async def generate_next_question(session: dict, message: str) -> dict:
+    """
+    Dynamically generate next question like a human salesperson
+    """
+
+    language = session["preferred_language"]
+
+    intent = session.get("intent")
+    product_type = session.get("product_type")
+    budget = session.get("budget")
+
+    # Fetch DB context
+    product_types = get_all_product_types()
+
+    product_context = ""
+    if product_type:
+        products = get_products_by_type(product_type)
+        prices = sorted(set(p["price"] for p in products if p.get("price")))
+        product_context = f"Available prices: {prices[:5]}"
+
+    prompt = f"""
+You are a smart showroom salesperson.
+
+GOAL:
+- Ask the NEXT best question naturally
+- Sound human, not robotic
+- Use context to guide conversation
+
+CUSTOMER DATA:
+- Intent: {intent}
+- Product: {product_type}
+- Budget: {budget}
+
+AVAILABLE PRODUCTS:
+{product_types}
+
+PRODUCT CONTEXT:
+{product_context}
+
+USER MESSAGE:
+{message}
+
+RULES:
+- Ask ONLY ONE question
+- Keep it short
+- Make it conversational
+- No generic questions
+- No repetition
+- Move toward purchase decision
+
+LANGUAGE:
+Respond in {language}
+
+OUTPUT:
+Return ONLY the question text
+"""
+
+    question = await call_groq(prompt)
+
+    return {
+        "type": "text",
+        "message": question.strip() if question else "Can you tell me more about what you're looking for?"
+    }

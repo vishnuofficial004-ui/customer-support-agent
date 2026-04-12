@@ -1,8 +1,12 @@
+from pathlib import Path
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from app.api.routes import router
-from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="app/.env")  # ✅ THIS LINE IS IMPORTANT
+
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(env_path)
 
 
 def create_app() -> FastAPI:

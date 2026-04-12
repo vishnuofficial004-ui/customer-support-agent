@@ -1,113 +1,112 @@
 from app.integrations.groq_client import call_groq
 from app.config.constants import SUPPORTED_LANGUAGES, LANGUAGE_SCRIPT_MAP
-import difflib
+
+LANGUAGE_PROMPT = (
+    "Please choose your preferred language from the following options: "
+    + ", ".join(SUPPORTED_LANGUAGES)
+    + "."
+)
 
 
-def normalize_language_input(message: str) -> str:
-    return message.strip().lower()
+def normalize_language_input(text: str) -> str | None:
+    normalized = text.strip().lower()
 
+    # Exact match
+    for lang in SUPPORTED_LANGUAGES:
+        if normalized == lang.lower():
+            return lang
 
-def match_language(message: str) -> str | None:
-    normalized = normalize_language_input(message)
-
-    language_map = {lang.lower(): lang for lang in SUPPORTED_LANGUAGES}
-
-    matches = difflib.get_close_matches(
-        normalized,
-        language_map.keys(),
-        n=1,
-        cutoff=0.75
-    )
-
-    if matches:
-        return language_map[matches[0]]
+    # Partial match (e.g., "i want english")
+    for lang in SUPPORTED_LANGUAGES:
+        if lang.lower() in normalized:
+            return lang
 
     return None
 
 
-async def process_language_step(session: dict, message: str) -> str:
+async def process_language_step(session: dict, message: str) -> str | None:
+    """
+    Handles:
+    - Initial language selection
+    - Mid-conversation language switching
 
-    # Step 1: Language selection
+    Returns:
+    - response (str) ONLY if language step handled
+    - None if control should move to next step
+    """
+
+    detected_language = normalize_language_input(message)
+
+    # -----------------------------
+    # 🔥 CASE 1: First time language selection
+    # -----------------------------
     if not session.get("preferred_language"):
-        matched_language = match_language(message)
+        if not detected_language:
+            return LANGUAGE_PROMPT
 
-        if matched_language:
-            session["preferred_language"] = matched_language
-            return await generate_confirmation(matched_language)
+        session["preferred_language"] = detected_language
+        session["language_selected"] = True
 
-        return build_language_prompt()
+        return await safe_translate(
+            "Thanks! Let's get started. What are you looking for?",
+            detected_language
+        )
 
-    # Step 2: Detect language (only for tracking)
-    detected_language = await detect_language(message)
-    session["current_language"] = detected_language
+    # -----------------------------
+    # 🔥 CASE 2: Mid-conversation language switch
+    # -----------------------------
+    if detected_language and detected_language != session.get("preferred_language"):
+        session["preferred_language"] = detected_language
 
-    # Step 3: Always use preferred language
-    language = session["preferred_language"]
+        return await safe_translate(
+            "Sure, I will continue in this language. What are you looking for?",
+            detected_language
+        )
 
-    response = await generate_response_in_language(message, language)
-
-    return response
-
-
-def build_language_prompt() -> str:
-    return "Please choose your preferred language: " + ", ".join(SUPPORTED_LANGUAGES)
-
-
-async def detect_language(message: str) -> str:
-    prompt = (
-        "Identify the language of the following text. "
-        "Handle transliterations like Tanglish, Hinglish, Tenglish. "
-        "Respond with only the language name.\n\n"
-        f"Text: {message}"
-    )
-    return await call_groq(prompt)
+    # -----------------------------
+    # 🔥 CASE 3: No language handling needed
+    # -----------------------------
+    return None
 
 
-async def generate_confirmation(language: str) -> str:
+# -----------------------------
+# SAFE TRANSLATION (CRITICAL)
+# -----------------------------
+async def safe_translate(text: str, language: str) -> str:
+    """
+    Production-safe translation:
+    - Avoids LLM for English
+    - Strict control for other languages
+    """
+
+    # ✅ Skip translation for English (avoid LLM randomness)
+    if language.lower() == "english":
+        return text
+
     script = LANGUAGE_SCRIPT_MAP.get(language, language)
 
     prompt = f"""
-You are a furniture showroom sales assistant.
-
-STRICT RULES:
-- Respond ONLY in {language}
-- Use ONLY {script}
-- Keep response SHORT (1-2 lines)
-- Do NOT use any other language
+You are a STRICT translator.
 
 TASK:
-- Confirm selected language
-- Ask what product they want (sofa, bed, mattress)
-
-OUTPUT:
-- Natural, simple, friendly
-"""
-    return await call_groq(prompt)
-
-
-async def generate_response_in_language(message: str, language: str) -> str:
-    script = LANGUAGE_SCRIPT_MAP.get(language, language)
-
-    prompt = f"""
-You are a professional furniture showroom sales assistant. 
+Translate the text into {language}.
 
 RULES:
-1. Always respond in {language} using ONLY {script}.
-2. Do NOT use English letters, transliteration, or any other language other than the above chosen language.
-3. Keep responses short (1-2 lines), friendly, and helpful.
-4. Respond only about furniture buying: sofas, beds, mattresses and related products that is present in the showrooms.
-5. Ask 1 relevant follow-up question related to what the user wants.
-6. Do NOT include extra explanations or unrelated text.
-7. keep in mind you should not respond in any other language other than what the language is confirmed even in reply prompts
-CONTEXT:
-- User is interacting on WhatsApp to buy furniture.
-- They may type in their preferred language or mixed/transliterated text.
+- Output ONLY in {language}
+- Use {script}
+- No explanation
+- No mixing languages
+- Keep meaning EXACT
 
-USER MESSAGE:
-{message}
+TEXT:
+{text}
 
 OUTPUT:
-- A short, natural, relevant response in {language} using {script}.
 """
 
-    return await call_groq(prompt)
+    resp = await call_groq(prompt)
+
+    if not resp:
+        return text
+
+    return resp.strip()
