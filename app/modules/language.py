@@ -1,112 +1,138 @@
 from app.integrations.groq_client import call_groq
 from app.config.constants import SUPPORTED_LANGUAGES, LANGUAGE_SCRIPT_MAP
+import difflib
 
 LANGUAGE_PROMPT = (
-    "Please choose your preferred language from the following options: "
+    "Please choose your preferred language: "
     + ", ".join(SUPPORTED_LANGUAGES)
-    + "."
 )
 
 
+# -----------------------------
+# 🔥 FUZZY + SMART MATCH
+# -----------------------------
 def normalize_language_input(text: str) -> str | None:
     normalized = text.strip().lower()
 
-    # Exact match
-    for lang in SUPPORTED_LANGUAGES:
-        if normalized == lang.lower():
-            return lang
+    lang_map = {lang.lower(): lang for lang in SUPPORTED_LANGUAGES}
 
-    # Partial match (e.g., "i want english")
-    for lang in SUPPORTED_LANGUAGES:
-        if lang.lower() in normalized:
-            return lang
+    # ✅ 1. Exact match
+    if normalized in lang_map:
+        return lang_map[normalized]
+
+    # ✅ 2. Partial match (sentence contains language)
+    for key in lang_map:
+        if key in normalized:
+            return lang_map[key]
+
+    # ✅ 3. Fuzzy match (handles typos like "englsh", "tmail")
+    matches = difflib.get_close_matches(
+        normalized,
+        lang_map.keys(),
+        n=1,
+        cutoff=0.6
+    )
+
+    if matches:
+        return lang_map[matches[0]]
 
     return None
 
 
+# -----------------------------
+# 🔥 AI LANGUAGE DETECTION
+# -----------------------------
+async def detect_language_ai(message: str) -> str | None:
+    prompt = f"""
+Identify the user's preferred language.
+
+RULES:
+- Return ONLY one word from:
+  {", ".join(SUPPORTED_LANGUAGES)}
+- Understand mixed inputs (Tanglish, Hinglish)
+- If unclear → return NONE
+
+Message:
+{message}
+"""
+    resp = await call_groq(prompt)
+
+    if not resp:
+        return None
+
+    resp = resp.strip()
+
+    return resp if resp in SUPPORTED_LANGUAGES else None
+
+
+# -----------------------------
+# 🔥 MAIN FUNCTION (NON-BLOCKING)
+# -----------------------------
 async def process_language_step(session: dict, message: str) -> str | None:
-    """
-    Handles:
-    - Initial language selection
-    - Mid-conversation language switching
 
-    Returns:
-    - response (str) ONLY if language step handled
-    - None if control should move to next step
-    """
-
+    # -----------------------------
+    # Try detecting language ALWAYS (silent intelligence)
+    # -----------------------------
     detected_language = normalize_language_input(message)
 
+    if not detected_language:
+        detected_language = await detect_language_ai(message)
+
     # -----------------------------
-    # 🔥 CASE 1: First time language selection
+    # CASE 1: First-time detection (NO INTERRUPTION)
     # -----------------------------
     if not session.get("preferred_language"):
-        if not detected_language:
-            return LANGUAGE_PROMPT
+        if detected_language:
+            session["preferred_language"] = detected_language
+            return None  # 🔥 DO NOT interrupt flow
 
-        session["preferred_language"] = detected_language
-        session["language_selected"] = True
-
-        return await safe_translate(
-            "Thanks! Let's get started. What are you looking for?",
-            detected_language
-        )
+        # Only ask if completely unknown
+        return LANGUAGE_PROMPT
 
     # -----------------------------
-    # 🔥 CASE 2: Mid-conversation language switch
+    # CASE 2: Mid-conversation switch
     # -----------------------------
     if detected_language and detected_language != session.get("preferred_language"):
         session["preferred_language"] = detected_language
 
         return await safe_translate(
-            "Sure, I will continue in this language. What are you looking for?",
+            "Sure, I will continue in this language.",
             detected_language
         )
 
     # -----------------------------
-    # 🔥 CASE 3: No language handling needed
+    # CASE 3: No action needed
     # -----------------------------
     return None
 
 
 # -----------------------------
-# SAFE TRANSLATION (CRITICAL)
+# 🔥 SAFE TRANSLATION
 # -----------------------------
 async def safe_translate(text: str, language: str) -> str:
-    """
-    Production-safe translation:
-    - Avoids LLM for English
-    - Strict control for other languages
-    """
 
-    # ✅ Skip translation for English (avoid LLM randomness)
+    if not language:
+        return text
+
+    # ✅ Avoid LLM for English
     if language.lower() == "english":
         return text
 
     script = LANGUAGE_SCRIPT_MAP.get(language, language)
 
     prompt = f"""
-You are a STRICT translator.
-
-TASK:
-Translate the text into {language}.
+Translate into {language} using {script}.
 
 RULES:
 - Output ONLY in {language}
-- Use {script}
 - No explanation
 - No mixing languages
-- Keep meaning EXACT
+- Keep it natural
 
-TEXT:
+Text:
 {text}
-
-OUTPUT:
 """
 
     resp = await call_groq(prompt)
 
-    if not resp:
-        return text
-
-    return resp.strip()
+    return resp.strip() if resp else text

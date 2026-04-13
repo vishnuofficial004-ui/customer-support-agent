@@ -1,192 +1,149 @@
 from app.integrations.groq_client import call_groq
 from app.config.constants import LANGUAGE_SCRIPT_MAP
-from app.db.products import get_products_by_type, get_all_product_types
+from app.db.products import get_products_by_type
 
 
-def filter_products(products, budget: str, intent: str):
+# -----------------------------
+# 🧠 CONVERSATION TYPE DETECTION
+# -----------------------------
+async def detect_conversation_type(message: str) -> str:
     """
-    Filter and rank products based on budget + intent
+    Classifies user message
     """
 
-    if not products:
+    prompt = f"""
+Classify user message intent.
+
+OPTIONS:
+- greeting
+- casual
+- exploring
+- buying
+- comparing
+- confused
+
+RULES:
+- Return ONLY one word
+- No explanation
+
+Message:
+{message}
+"""
+
+    resp = await call_groq(prompt)
+
+    if not resp:
+        return "exploring"
+
+    return resp.strip().lower()
+
+
+# -----------------------------
+# 📦 PRODUCT FETCH + SAFE FILTER
+# -----------------------------
+def get_product_context(session: dict):
+    product_type = session.get("product_type")
+
+    if not product_type:
         return []
 
-    filtered = products
+    products = get_products_by_type(product_type)
 
-    # -----------------------------
-    # Budget filtering
-    # -----------------------------
-    try:
-        if budget:
-            if "-" in budget:
-                min_b, max_b = map(int, budget.split("-"))
-                filtered = [p for p in filtered if min_b <= p.get("price", 0) <= max_b]
-            else:
-                val = int(budget)
-                filtered = [
-                    p for p in filtered
-                    if abs(p.get("price", 0) - val) <= 5000
-                ]
-    except Exception:
-        pass  # never break flow
-
-    # -----------------------------
-    # If nothing matches → fallback to all
-    # -----------------------------
-    if not filtered:
-        filtered = products
-
-    # -----------------------------
-    # Intent-based ranking (dynamic, not hardcoded)
-    # -----------------------------
-    def score(p):
-        s = 0
-
-        # Soft intent matching (no strict hardcoding)
-        features = " ".join(p.get("features", [])).lower()
-
-        if intent and intent != "unknown":
-            if intent in features:
-                s += 2
-
-        # Budget proximity scoring
-        if budget:
-            try:
-                target = int(budget.split("-")[0])
-                s += max(0, 2 - abs(p.get("price", 0) - target) // 10000)
-            except:
-                pass
-
-        return s
-
-    filtered.sort(key=score, reverse=True)
-
-    return filtered[:5]
+    # keep it small + relevant
+    return [
+        {
+            "name": p.get("name"),
+            "price": p.get("price"),
+            "features": p.get("features", [])
+        }
+        for p in products[:5]
+    ]
 
 
+# -----------------------------
+# 🧠 MAIN AGENT
+# -----------------------------
 async def generate_agent_response(session: dict, message: str) -> str:
-    language = session["preferred_language"]
+
+    language = session.get("preferred_language", "English")
     script = LANGUAGE_SCRIPT_MAP.get(language, language)
 
     intent = session.get("intent")
     budget = session.get("budget")
     product_type = session.get("product_type")
 
-    # -----------------------------
-    # Validate product availability
-    # -----------------------------
-    available_types = get_all_product_types()
-
-    if not product_type or product_type not in available_types:
-        prompt = f"""
-You are a furniture showroom assistant.
-
-Customer asked for a product which is not available.
-
-AVAILABLE CATEGORIES:
-{available_types}
-
-TASK:
-- Politely say it's not available
-- Suggest closest alternatives
-- Keep it short
-- Respond ONLY in {language} using {script}
-
-USER MESSAGE:
-{message}
-"""
-        return await call_groq(prompt)
+    history = session.get("history", [])[-3:]  # last 3 msgs
 
     # -----------------------------
-    # Fetch products
+    # Detect conversation type
     # -----------------------------
-    products = get_products_by_type(product_type)
-
-    if not products:
-        prompt = f"""
-You are a showroom assistant.
-
-We currently don't have this product in stock.
-
-AVAILABLE CATEGORIES:
-{available_types}
-
-TASK:
-- Inform politely
-- Suggest other categories
-- Keep it short
-- Respond ONLY in {language} using {script}
-
-USER MESSAGE:
-{message}
-"""
-        return await call_groq(prompt)
+    convo_type = await detect_conversation_type(message)
 
     # -----------------------------
-    # Filter + rank
+    # Product context
     # -----------------------------
-    filtered_products = filter_products(products, budget, intent)
+    product_context = get_product_context(session)
 
     # -----------------------------
-    # Handle no filtered results
-    # -----------------------------
-    if not filtered_products:
-        filtered_products = products[:3]
-
-    # -----------------------------
-    # Prepare context
-    # -----------------------------
-    product_context = [
-        {
-            "name": p.get("name"),
-            "price": p.get("price"),
-            "features": p.get("features", [])
-        }
-        for p in filtered_products
-    ]
-
-    # -----------------------------
-    # Prompt
+    # Prompt (STRICT CONTROL)
     # -----------------------------
     prompt = f"""
-You are a HIGHLY SKILLED furniture showroom sales assistant.
+You are a PROFESSIONAL showroom sales assistant.
 
 IMPORTANT:
-- User may speak in any language (English, Tanglish, Hindi, etc.)
-- You MUST understand it
-- But ALWAYS reply ONLY in {language} using {script}
+- Understand any language input
+- ALWAYS reply ONLY in {language} using {script}
 
-YOUR GOAL:
-- Recommend best product from AVAILABLE PRODUCTS
-- Help customer decide quickly
-- Move toward purchase
+CONTEXT:
+Conversation type: {convo_type}
+Intent: {intent}
+Budget: {budget}
+Product: {product_type}
+
+RECENT CONVERSATION:
+{history}
 
 AVAILABLE PRODUCTS:
 {product_context}
 
-CUSTOMER PROFILE:
-- Intent: {intent}
-- Budget: {budget}
-- Product Interest: {product_type}
-
 STRICT RULES:
-- DO NOT invent products
-- Recommend max 1–2 products
-- Mention price naturally
+- Be natural and human-like
 - Keep response SHORT (1–2 lines)
-- Ask 1 smart follow-up question
+- NEVER ignore user's message
+- DO NOT ask too many questions
+- DO NOT sound robotic
+- DO NOT invent products
+- If greeting → respond friendly
+- If exploring → guide gently
+- If buying → recommend confidently
+- If confused → simplify
 
-STYLE:
-- Natural, human-like
-- Confident
-- Sales-focused (but not pushy)
-- No generic lines
+SALES STRATEGY:
+- Subtle persuasion
+- Build trust
+- Guide step-by-step
 
 USER MESSAGE:
 {message}
 
 OUTPUT:
-- Final answer only
+Final response only
 """
 
-    return await call_groq(prompt)
+    resp = await call_groq(prompt)
+
+    return resp.strip() if resp else fallback_response(language)
+
+
+# -----------------------------
+# 🛟 SAFE FALLBACK
+# -----------------------------
+def fallback_response(language: str) -> str:
+
+    if language.lower() == "tamil":
+        return "நான் உதவ தயாராக இருக்கிறேன். நீங்கள் எந்த பொருளை தேடுகிறீர்கள்?"
+
+    if language.lower() == "hindi":
+        return "मैं आपकी मदद कर सकता हूँ। आप क्या ढूंढ रहे हैं?"
+
+    return "I'm here to help. What kind of furniture are you looking for?"
