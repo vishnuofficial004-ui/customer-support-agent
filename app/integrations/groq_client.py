@@ -11,12 +11,19 @@ def get_client():
     return Groq(api_key=api_key)
 
 
-async def call_groq(prompt: str) -> str:
+async def call_groq(prompt: str, temperature: float = 0.3) -> str:
     client = get_client()
 
     response = client.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}],
-        model=os.getenv("GROQ_MODEL")
+        messages=[
+            {
+                "role": "system",
+                "content": "You must strictly follow instructions and output format. No creativity outside rules."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        model=os.getenv("GROQ_MODEL"),
+        temperature=temperature
     )
 
     return response.choices[0].message.content.strip()
